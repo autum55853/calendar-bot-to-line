@@ -40,6 +40,8 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 | `setup()` | 手動執行一次 | 清除舊 trigger、初始化 syncToken、建立新 trigger |
 | `onCalendarChange(e)` | Calendar onEventUpdated trigger | 用 syncToken 增量取得變更事件，判斷新增/修改/刪除並發 LINE |
 | `sendDailyReminders()` | Time-based trigger 每天 09:00 | 查詢所有日曆明日事件，跨日曆去重後發 LINE |
+| `doGet(e)` | HTTP GET（LINE 富選單點擊） | 回傳 LIFF 表單 HTML 供使用者新增行程 |
+| `doPost(e)` | HTTP POST（LINE webhook 與 LIFF 表單提交） | 處理 LINE 訊息與 LIFF `createEvent` 表單提交 |
 
 ### 關鍵設計細節
 
