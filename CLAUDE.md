@@ -24,6 +24,7 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 | `OWNER_USER_ID` | 擁有者 LINE userId（`U` 開頭） |
 | `CONTACT_USER_ID` | 對方 LINE userId（`U` 開頭） |
 | `CALENDAR_IDS` | 逗號分隔的 Calendar ID |
+| `LIFF_APP_ID` | LIFF App ID（格式：`1234567890-xxxxxxxx`），用於「新增行程」表單 |
 
 `.env` 僅供本地參考，**不會被 Apps Script 讀取**。
 
@@ -46,6 +47,18 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 - **新增 vs 修改判斷**：`created` 與 `updated` 時間差 < 5000ms 視為新建。
 - **跨日曆去重**：`sendDailyReminders` 用 `event.id` 和 `標題|開始時間` 雙重 key 去重，防止同步至多個日曆的事件重複出現。
 - **訊息發送**：同一事件通知同時推播給 `OWNER_USER_ID` 和 `CONTACT_USER_ID`。
+
+## LIFF 新增行程表單
+
+「新增行程」功能使用 LINE LIFF 開啟 HTML 表單（`doGet` 回傳），使用者可用 date picker 填入時間。
+
+**設定步驟：**
+1. 前往 LINE Developers Console → Messaging API 頻道 → LIFF 頁籤
+2. 建立新 LIFF App：Size = Full，Endpoint URL = Apps Script Web App URL
+3. 取得 LIFF ID（格式：`1234567890-xxxxxxxx`）
+4. 在 Script Properties 設定 `LIFF_APP_ID`
+
+**CORS 限制：** LIFF 表單送出用 `fetch` + `mode: 'no-cors'`（避免 preflight），回應為 opaque 型態無法讀取，前端採樂觀 UI（送出即顯示成功）。時間統一以台灣時區（UTC+8）處理。
 
 ## 注意事項
 

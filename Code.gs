@@ -198,12 +198,23 @@ function _getTomorrowRange() {
 
 // ===== Webhook 入口（LINE 按鈕觸發）=====
 function doGet(e) {
-  return ContentService.createTextOutput("OK").setMimeType(ContentService.MimeType.TEXT);
+  const liffId = PROPS.getProperty("LIFF_APP_ID");
+  if (!liffId) {
+    return ContentService.createTextOutput("請先在 Script Properties 設定 LIFF_APP_ID").setMimeType(ContentService.MimeType.TEXT);
+  }
+  const scriptUrl = ScriptApp.getService().getUrl();
+  const html = _getFormHtml().replace(/\{\{SCRIPT_URL\}\}/g, scriptUrl).replace(/\{\{LIFF_ID\}\}/g, liffId);
+  return HtmlService.createHtmlOutput(html)
+    .setTitle("新增行程")
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
 }
 
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    if (body.action === "createEvent") {
+      return _handleLiffCreateEvent(body);
+    }
     (body.events || []).forEach((event) => {
       if (event.type === "message" && event.message.type === "text") {
         _handleLineMessage(event.replyToken, event.message.text.trim());
@@ -215,6 +226,41 @@ function doPost(e) {
   return ContentService.createTextOutput(JSON.stringify({ status: "ok" })).setMimeType(ContentService.MimeType.JSON);
 }
 
+function _handleLiffCreateEvent(data) {
+  try {
+    const { title, start, end, location, note } = data;
+    if (!title || !start || !end) {
+      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "缺少必填欄位" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    const startDate = new Date(start + ":00+08:00");
+    const endDate = new Date(end + ":00+08:00");
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "時間格式錯誤" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    const calendarIds = _getCalendarIds();
+    if (calendarIds.length === 0) {
+      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "未設定 CALENDAR_IDS" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+    const eventResource = {
+      summary: title,
+      start: { dateTime: startDate.toISOString(), timeZone: TZ },
+      end: { dateTime: endDate.toISOString(), timeZone: TZ },
+    };
+    if (location) eventResource.location = location;
+    if (note) eventResource.description = note;
+    Calendar.Events.insert(eventResource, calendarIds[0]);
+    Logger.log("LIFF 建立行程成功：" + title);
+    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    Logger.log("LIFF 建立行程失敗：" + err.message);
+    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
 function _handleLineMessage(replyToken, text) {
   const token = PROPS.getProperty("LINE_ACCESS_TOKEN");
   let replyText;
@@ -224,7 +270,10 @@ function _handleLineMessage(replyToken, text) {
   } else if (text === "下週行程") {
     replyText = _getWeekEventText(1);
   } else if (text === "新增行程") {
-    replyText = "請依以下格式傳送行程資訊：\n\n行程名稱\n開始時間（格式：2026/06/10 14:00）\n結束時間（格式：2026/06/10 15:00）\n備註（選填）\n\n範例：\n團隊會議\n2026/06/10 14:00\n2026/06/10 15:00\n記得帶文件";
+    const liffId = PROPS.getProperty("LIFF_APP_ID");
+    replyText = liffId
+      ? "📅 點選連結開啟新增行程表單：\nhttps://liff.line.me/" + liffId
+      : "❌ 尚未設定 LIFF_APP_ID，請聯繫管理員";
   } else if (_looksLikeEventData(text)) {
     replyText = _createEventFromText(text);
   } else {
@@ -393,4 +442,98 @@ function _formatDateTime(dateObj) {
   if (!dateObj) return "—";
   if (dateObj.date) return dateObj.date + "（全天）";
   return Utilities.formatDate(new Date(dateObj.dateTime), TZ, "yyyy/MM/dd HH:mm");
+}
+
+// ===== LIFF 新增行程表單 HTML =====
+function _getFormHtml() {
+  return '<!DOCTYPE html>\n' +
+    '<html lang="zh-TW">\n' +
+    '<head>\n' +
+    '<meta charset="utf-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">\n' +
+    '<title>新增行程</title>\n' +
+    '<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/versions/2.22.3/sdk.js"><\/script>\n' +
+    '<style>\n' +
+    '* { box-sizing: border-box; margin: 0; padding: 0; }\n' +
+    'body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f7; min-height: 100vh; }\n' +
+    '.container { max-width: 480px; margin: 0 auto; padding: 20px 16px 40px; }\n' +
+    'h1 { font-size: 20px; font-weight: 600; color: #1a1a1a; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 2px solid #06C755; }\n' +
+    '.field { margin-bottom: 16px; }\n' +
+    'label { display: block; font-size: 13px; font-weight: 500; color: #555; margin-bottom: 6px; }\n' +
+    '.required::after { content: " *"; color: #e74c3c; }\n' +
+    'input[type="text"], input[type="datetime-local"], textarea {\n' +
+    '  width: 100%; padding: 12px; border: 1.5px solid #ddd; border-radius: 10px;\n' +
+    '  font-size: 15px; color: #333; background: #fff; outline: none;\n' +
+    '}\n' +
+    'input:focus, textarea:focus { border-color: #06C755; }\n' +
+    'textarea { height: 80px; resize: vertical; }\n' +
+    '.btn {\n' +
+    '  width: 100%; padding: 15px; background: #06C755; color: #fff;\n' +
+    '  border: none; border-radius: 10px; font-size: 16px; font-weight: 600;\n' +
+    '  cursor: pointer; margin-top: 8px;\n' +
+    '}\n' +
+    '.btn:disabled { background: #aaa; cursor: not-allowed; }\n' +
+    '.msg { margin-top: 14px; text-align: center; font-size: 14px; padding: 10px; border-radius: 8px; display: none; }\n' +
+    '.msg.err { background: #ffeaea; color: #c0392b; display: block; }\n' +
+    '.msg.ok { background: #eafaf1; color: #1e8449; display: block; }\n' +
+    '.msg.loading { background: #f0f0f0; color: #555; display: block; }\n' +
+    '<\/style>\n' +
+    '<\/head>\n' +
+    '<body>\n' +
+    '<div class="container">\n' +
+    '<h1>📅 新增行程<\/h1>\n' +
+    '<div class="field"><label class="required">行程名稱<\/label><input type="text" id="title" placeholder="輸入行程名稱"><\/div>\n' +
+    '<div class="field"><label class="required">開始時間<\/label><input type="datetime-local" id="start"><\/div>\n' +
+    '<div class="field"><label class="required">結束時間<\/label><input type="datetime-local" id="end"><\/div>\n' +
+    '<div class="field"><label>地點<\/label><input type="text" id="location" placeholder="輸入地點（選填）"><\/div>\n' +
+    '<div class="field"><label>備註<\/label><textarea id="note" placeholder="輸入備註（選填）"><\/textarea><\/div>\n' +
+    '<button class="btn" id="submitBtn">建立行程<\/button>\n' +
+    '<div class="msg" id="msg"><\/div>\n' +
+    '<\/div>\n' +
+    '<script>\n' +
+    'var SCRIPT_URL = "{{SCRIPT_URL}}";\n' +
+    'var LIFF_ID = "{{LIFF_ID}}";\n' +
+    '(function() {\n' +
+    '  var now = new Date();\n' +
+    '  now.setMinutes(0, 0, 0);\n' +
+    '  now.setHours(now.getHours() + 1);\n' +
+    '  function toLocalStr(d) { return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }\n' +
+    '  document.getElementById("start").value = toLocalStr(now);\n' +
+    '  document.getElementById("end").value = toLocalStr(new Date(now.getTime() + 3600000));\n' +
+    '})();\n' +
+    'liff.init({ liffId: LIFF_ID }).catch(function(e) { console.warn("LIFF init:", e); });\n' +
+    'function showMsg(text, type) {\n' +
+    '  var el = document.getElementById("msg");\n' +
+    '  el.textContent = text;\n' +
+    '  el.className = "msg " + type;\n' +
+    '}\n' +
+    'document.getElementById("submitBtn").addEventListener("click", function() {\n' +
+    '  var self = this;\n' +
+    '  var title = document.getElementById("title").value.trim();\n' +
+    '  var start = document.getElementById("start").value;\n' +
+    '  var end = document.getElementById("end").value;\n' +
+    '  var location = document.getElementById("location").value.trim();\n' +
+    '  var note = document.getElementById("note").value.trim();\n' +
+    '  if (!title) { showMsg("請輸入行程名稱", "err"); return; }\n' +
+    '  if (!start) { showMsg("請選擇開始時間", "err"); return; }\n' +
+    '  if (!end) { showMsg("請選擇結束時間", "err"); return; }\n' +
+    '  if (end <= start) { showMsg("結束時間需晚於開始時間", "err"); return; }\n' +
+    '  self.disabled = true;\n' +
+    '  showMsg("建立中...", "loading");\n' +
+    '  fetch(SCRIPT_URL, {\n' +
+    '    method: "POST",\n' +
+    '    mode: "no-cors",\n' +
+    '    headers: { "Content-Type": "text/plain" },\n' +
+    '    body: JSON.stringify({ action: "createEvent", title: title, start: start, end: end, location: location, note: note })\n' +
+    '  }).then(function() {\n' +
+    '    showMsg("✅ 行程已建立！", "ok");\n' +
+    '    setTimeout(function() { try { liff.closeWindow(); } catch(e) {} }, 1500);\n' +
+    '  }).catch(function() {\n' +
+    '    showMsg("❌ 送出失敗，請重試", "err");\n' +
+    '    self.disabled = false;\n' +
+    '  });\n' +
+    '});\n' +
+    '<\/script>\n' +
+    '<\/body>\n' +
+    '<\/html>';
 }
