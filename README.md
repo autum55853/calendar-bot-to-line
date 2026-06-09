@@ -49,6 +49,7 @@ Google Calendar 新增 / 修改 / 刪除事件
 | `CONTACT_USER_ID` | `Uxxxxxxxxxx` | 對方對 Bot 傳訊息後從 Webhook log 取 userId |
 | `CALENDAR_IDS` | `a@gmail.com,b@gmail.com` | 逗號分隔的 Calendar ID，Google Calendar 設定 → 整合日曆 → 日曆 ID |
 | `LIFF_APP_ID` | `1234567890-xxxxxxxx` | LINE Developers → Messaging API → LIFF 頁籤 → 建立 LIFF App (Size: Full) |
+| `MUTE_KEYWORDS` | `信用卡結帳日,每月扣款` | 逗號分隔的靜音關鍵字，含此關鍵字的行程不發任何通知（選填） |
 
 #### 取得 userId（OWNER / CONTACT）
 
@@ -82,11 +83,24 @@ Webhook handler 中印出 `event.source.userId` 即可取得各自的 userId（`
 3. 第一次需授權 Google 帳號權限
 4. 執行記錄顯示「Setup 完成。已建立 N 個 trigger」即成功（N = 日曆數 + 1）
 
-### 7. 測試
+### 6. 測試
 
 - **變更通知**：在 Google Calendar 新增、修改或刪除一個事件，數秒後 LINE 應收到對應通知。
 - **明日提醒**：選函式 `sendDailyReminders` → 執行，確認 LINE 收到明日行程列表（需有隔天的行程）。
 - **新增行程**（若設定 LIFF）：點擊 LINE 富選單「新增行程」連結，填入表單並提交，確認事件新增至 Google Calendar。
+
+### 7. LINE 富選單設定（可選）
+
+新增富選單按鈕以提升使用體驗：
+
+1. [LINE Developers Console](https://developers.line.biz/) → Messaging API → 富選單管理
+2. 新增富選單，新增按鈕如下：
+
+| 按鈕標籤 | 動作類型 | 動作值 |
+|---|---|---|
+| 新增行程 | Postback / URI | `https://liff.line.me/{LIFF_APP_ID}` |
+| 本週行程 | Message | `本週行程` |
+| 下週行程 | Message | `下週行程` |
 
 ---
 
@@ -129,10 +143,62 @@ Webhook handler 中印出 `event.source.userId` 即可取得各自的 userId（`
    📍 會議室 A
 ```
 
+---
+
+## 新增行程功能
+
+### 方式 1：LIFF 表單（推薦）
+
+點擊 LINE 富選單「新增行程」，透過日期選擇器填入：
+- 行程名稱（必填）
+- 開始時間（必填，datetime-local 格式）
+- 結束時間（必填）
+- 地點（選填）
+- 備註（選填）
+
+### 方式 2：文字訊息
+
+直接在 LINE 傳送訊息，格式如下：
+
+**最簡形式**（預設結束時間 = 開始時間 + 1 小時）：
+```
+會議
+2026/06/10 14:00
+```
+
+**指定結束時間**：
+```
+會議
+2026/06/10 14:00
+2026/06/10 15:00
+會議室 A
+```
+
+**完整格式**（含地點與備註）：
+```
+會議
+2026/06/10 14:00
+2026/06/10 15:00
+會議室 A
+討論 Q3 計畫
+```
+
+系統自動建立事件並回覆確認訊息。
+
+---
+
 ## 注意事項
 
-- `setup()` 只需執行一次；重複執行會自動清除舊 trigger
-- 每天 09:00 提醒依 `appsscript.json` 的 `timeZone: Asia/Taipei`，實際觸發有 ±15 分鐘誤差
-- 明日無行程時不發通知
-- syncToken 過期（HTTP 410）時腳本會自動重設，不影響後續通知
-- LINE Messaging API push message 需要 **付費方案** 或在免費額度內（每月 200 則免費）
+### 運作細節
+
+- **setup() 只需執行一次**；重複執行會自動清除舊 trigger 並重建
+- **時區**：所有時間統一以 `Asia/Taipei`（UTC+8）處理，見 `appsscript.json`
+- **每日提醒觸發**：每天 09:00，實際觸發有 ±15 分鐘誤差（Apps Script 限制）
+- **跨日曆去重**：`sendDailyReminders` 用 `event.id` 和「標題|開始時間」雙重 key 去重，防止同步至多個日曆的事件重複
+- **同一事件同時通知**：變更或提醒通知同時推播給 `OWNER_USER_ID` 和 `CONTACT_USER_ID`
+- **syncToken 機制**：自動增量同步以減少 API 呼叫，HTTP 410 錯誤時自動重設，不影響後續通知
+- **靜音功能**：若設定 `MUTE_KEYWORDS`（如「信用卡結帳日」），含此關鍵字的行程不發任何通知
+- **明日無行程**：若隔天無行程，不發提醒通知
+- **新增行程快取**：新增後 5 分鐘內自動註記 cache key，避免立即被 onEventUpdated trigger 重複通知
+- **LINE 推播額度**：push message 需要 **付費方案** 或在免費額度內（每月 200 則免費）
+- **時間篩選**：`onCalendarChange` 自動略過已過期（> 24 小時前）的事件，避免歷史資料污染

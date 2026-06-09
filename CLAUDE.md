@@ -25,6 +25,7 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 | `CONTACT_USER_ID` | 對方 LINE userId（`U` 開頭） |
 | `CALENDAR_IDS` | 逗號分隔的 Calendar ID |
 | `LIFF_APP_ID` | LIFF App ID（格式：`1234567890-xxxxxxxx`），用於「新增行程」表單 |
+| `MUTE_KEYWORDS` | 逗號分隔的靜音關鍵字，含此關鍵字的行程不發任何通知（選填） |
 
 `.env` 僅供本地參考，**不會被 Apps Script 讀取**。
 
