@@ -291,7 +291,15 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
-    Logger.log(e.postData.contents);
+    // const token = PROPS.getProperty("LINE_ACCESS_TOKEN");
+    // const ownerUserId = PROPS.getProperty("OWNER_USER_ID");
+
+    // // 暫時：把收到的 source userId 轉傳給自己
+    // if (body.events && body.events[0]) {
+    //   const sourceId = body.events[0].source.userId || "no userId";
+    //   _sendLineMessage(token, ownerUserId, "來源 userId: " + sourceId);
+    // }
+    // ... 原有程式碼繼續
     if (body.action === "createEvent") {
       return _handleLiffCreateEvent(body);
     }
