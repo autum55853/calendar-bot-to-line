@@ -291,6 +291,7 @@ function doGet(e) {
 function doPost(e) {
   try {
     const body = JSON.parse(e.postData.contents);
+    Logger.log(e.postData.contents);
     if (body.action === "createEvent") {
       return _handleLiffCreateEvent(body);
     }
