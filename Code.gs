@@ -213,9 +213,9 @@ function _formatChangeMessage(item, overrideIsNew) {
 // ===== 明日行程提醒（每天 09:00 執行）=====
 function sendDailyReminders() {
   const calendarIds = _getCalendarIds();
-  const token = PROPS.getProperty("LINE_ACCESS_TOKEN");
-  const ownerUserId = PROPS.getProperty("OWNER_USER_ID");
-  const contactUserId = PROPS.getProperty("CONTACT_USER_ID");
+  const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
+  const ownerUserId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
+  const contactUserId = (PROPS.getProperty("CONTACT_USER_ID") || "").trim();
   if (calendarIds.length === 0 || !token || !ownerUserId || !contactUserId) return;
 
   const { start, end } = _getTomorrowRange();
@@ -263,8 +263,21 @@ function sendDailyReminders() {
   });
 
   const text = lines.join("\n");
-  [ownerUserId, contactUserId].forEach((userId) => _sendLineMessage(token, userId, text));
-  Logger.log("已發送明日行程提醒，共 " + allEvents.length + " 筆");
+
+  // 先發給 owner
+  _sendLineMessage(token, ownerUserId, text);
+
+  // 發給 contact，並把結果回報給 owner 確認（contact 失敗不影響 owner）
+  let contactStatus;
+  try {
+    _sendLineMessage(token, contactUserId, text);
+    contactStatus = "✅ 每日提醒已傳送給 contact\nuserId=" + contactUserId;
+  } catch (sendErr) {
+    contactStatus = "❌ 傳送 contact 失敗\nuserId=" + contactUserId + "\n錯誤：" + sendErr.message;
+  }
+  _sendLineMessage(token, ownerUserId, contactStatus);
+
+  Logger.log("已發送明日行程提醒，共 " + allEvents.length + " 筆；" + contactStatus.replace(/\n/g, " "));
 }
 
 function _getTomorrowRange() {
@@ -358,7 +371,7 @@ function _handleLiffCreateEvent(data) {
 }
 
 function _handleLineMessage(replyToken, text) {
-  const token = PROPS.getProperty("LINE_ACCESS_TOKEN");
+  const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
   let replyText;
 
   if (text === "本週行程") {
@@ -642,7 +655,7 @@ function _getFormHtml() {
 
 // ===== 測試發送訊息 =====
 function testSend() {
-  const token = PROPS.getProperty("LINE_ACCESS_TOKEN");
-  const userId = PROPS.getProperty("OWNER_USER_ID");
+  const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
+  const userId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
   _sendLineMessage(token, userId, "測試訊息 " + new Date());
 }
