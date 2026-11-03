@@ -226,6 +226,13 @@ test("LIFF 表單 HTML 會送出 idToken", () => {
   assert.match(html, /idToken: idToken/);
 });
 
+test("LIFF 表單 HTML 限制開始/結束時間不可選過去日期", () => {
+  const html = loadEnv().ctx._getFormHtml();
+  assert.match(html, /getElementById\("start"\)\.min = /);
+  assert.match(html, /getElementById\("end"\)\.min = /);
+  assert.match(html, /不可選擇過去的日期/);
+});
+
 // ===== #2 額度、#3 告警：每日提醒 =====
 const tomorrowEvent = { id: "e1", summary: "牙醫", start: { dateTime: "2026-06-11T10:00:00+08:00" }, end: { dateTime: "2026-06-11T11:00:00+08:00" } };
 

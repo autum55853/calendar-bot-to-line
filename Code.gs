@@ -786,6 +786,10 @@ function _getFormHtml() {
     "  function toLocalStr(d) { return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }\n" +
     '  document.getElementById("start").value = toLocalStr(defaultStart);\n' +
     '  document.getElementById("end").value = toLocalStr(new Date(defaultStart.getTime() + 3600000));\n' +
+    "  var todayStart = new Date();\n" +
+    "  todayStart.setHours(0, 0, 0, 0);\n" +
+    '  document.getElementById("start").min = toLocalStr(todayStart);\n' +
+    '  document.getElementById("end").min = toLocalStr(todayStart);\n' +
     "})();\n" +
     'var liffReady = liff.init({ liffId: LIFF_ID }).catch(function(e) { console.warn("LIFF init:", e); });\n' +
     "function showMsg(text, type) {\n" +
@@ -803,6 +807,8 @@ function _getFormHtml() {
     '  if (!title) { showMsg("請輸入行程名稱", "err"); return; }\n' +
     '  if (!start) { showMsg("請選擇開始時間", "err"); return; }\n' +
     '  if (!end) { showMsg("請選擇結束時間", "err"); return; }\n' +
+    '  var minStr = document.getElementById("start").min;\n' +
+    '  if (minStr && (start < minStr || end < minStr)) { showMsg("不可選擇過去的日期", "err"); return; }\n' +
     '  if (end <= start) { showMsg("結束時間需晚於開始時間", "err"); return; }\n' +
     "  self.disabled = true;\n" +
     '  showMsg("建立中...", "loading");\n' +
