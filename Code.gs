@@ -11,6 +11,7 @@
 const PROPS = PropertiesService.getScriptProperties();
 const LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 const LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply";
+const LINE_VERIFY_URL = "https://api.line.me/oauth2/v2.1/verify";
 const TZ = "Asia/Taipei";
 
 // ===== 初始化（只需執行一次）=====
@@ -39,6 +40,99 @@ function _getCalendarIds() {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+function _getConfig() {
+  return {
+    calendarIds: _getCalendarIds(),
+    token: (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim(),
+    ownerUserId: (PROPS.getProperty("OWNER_USER_ID") || "").trim(),
+    contactUserId: (PROPS.getProperty("CONTACT_USER_ID") || "").trim(),
+  };
+}
+
+function _jsonOut(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj)).setMimeType(ContentService.MimeType.JSON);
+}
+
+// 查詢所有日曆的區間事件，以 event.id 與「標題|開始時間」去重後依開始時間排序
+function _fetchMergedEvents(start, end, excludeMuted) {
+  const seen = Object.create(null);
+  const allEvents = [];
+
+  _getCalendarIds().forEach((calendarId) => {
+    const result = Calendar.Events.list(calendarId, {
+      timeMin: start.toISOString(),
+      timeMax: end.toISOString(),
+      showDeleted: false,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+    (result.items || []).forEach((event) => {
+      const titleKey = (event.summary || "") + "|" + (event.start.dateTime || event.start.date || "");
+      if (!seen[event.id] && !seen[titleKey]) {
+        seen[event.id] = true;
+        seen[titleKey] = true;
+        if (!excludeMuted || !_isMutedEvent(event.summary || "")) {
+          allEvents.push(event);
+        }
+      }
+    });
+  });
+
+  // 跨日曆合併後重新排序
+  allEvents.sort((a, b) => {
+    const at = a.start.dateTime || a.start.date;
+    const bt = b.start.dateTime || b.start.date;
+    return at < bt ? -1 : at > bt ? 1 : 0;
+  });
+  return allEvents;
+}
+
+// 白名單：只有 OWNER / CONTACT 能操作 bot；未設定時一律拒絕
+function _isAllowedUser(userId) {
+  if (!userId) return false;
+  const allowed = [PROPS.getProperty("OWNER_USER_ID"), PROPS.getProperty("CONTACT_USER_ID")].map((s) => (s || "").trim()).filter(Boolean);
+  return allowed.indexOf(userId) !== -1;
+}
+
+// 驗證 LIFF ID token，回傳 userId（sub）；失敗回 null
+// client_id 為 LIFF_APP_ID 的 channel ID 前段
+function _verifyLiffIdToken(idToken) {
+  const channelId = (PROPS.getProperty("LIFF_APP_ID") || "").split("-")[0];
+  if (!idToken || !channelId) return null;
+  try {
+    const response = UrlFetchApp.fetch(LINE_VERIFY_URL, {
+      method: "post",
+      payload: { id_token: idToken, client_id: channelId },
+      muteHttpExceptions: true,
+    });
+    if (response.getResponseCode() !== 200) {
+      Logger.log("ID token 驗證失敗 " + response.getResponseCode() + ": " + response.getContentText());
+      return null;
+    }
+    return JSON.parse(response.getContentText()).sub || null;
+  } catch (err) {
+    Logger.log("ID token 驗證例外：" + err.message);
+    return null;
+  }
+}
+
+// 失敗告警：推播給 owner；同一 context 10 分鐘內只發一次；告警本身失敗只 log
+function _alertOwner(context, err) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const key = "alert_" + context;
+    if (cache.get(key)) return;
+    cache.put(key, "1", 600);
+    const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
+    const ownerUserId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
+    if (!token || !ownerUserId) return;
+    const msg = err && err.message ? err.message : String(err);
+    _sendLineMessage(token, ownerUserId, "🚨 行事曆 Bot 異常\n──────────\n" + context + "\n" + msg);
+  } catch (alertErr) {
+    Logger.log("告警發送失敗：" + alertErr.message);
+  }
 }
 
 function _initSyncToken(calendarId) {
@@ -73,6 +167,7 @@ function onCalendarChange(e) {
   }
   cache.put(calLockKey, "1", 60);
 
+  const sendFailures = [];
   try {
     const syncToken = PROPS.getProperty("SYNC_TOKEN_" + calendarId);
 
@@ -83,9 +178,7 @@ function onCalendarChange(e) {
       baseParams.updatedMin = new Date(Date.now() - 10 * 60 * 1000).toISOString();
     }
 
-    const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
-    const ownerUserId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
-    const contactUserId = (PROPS.getProperty("CONTACT_USER_ID") || "").trim();
+    const { token, ownerUserId, contactUserId } = _getConfig();
     if (!token || !ownerUserId || !contactUserId) {
       throw new Error("請設定 LINE_ACCESS_TOKEN、OWNER_USER_ID、CONTACT_USER_ID");
     }
@@ -155,6 +248,7 @@ function onCalendarChange(e) {
             _sendLineMessage(token, userId, text);
           } catch (sendErr) {
             Logger.log("發送失敗 userId=" + userId + " err=" + sendErr.message);
+            sendFailures.push((item.summary || item.id) + " → " + userId + "：" + sendErr.message);
           }
         });
         Logger.log("已發送變更通知：" + (item.summary || item.id));
@@ -172,21 +266,31 @@ function onCalendarChange(e) {
     } else if (pageToken) {
       Logger.log("分頁未完成，下次 trigger 再續：" + calendarId);
     }
+
+    if (sendFailures.length > 0) {
+      _alertOwner("變更通知發送失敗 " + calendarId, new Error(sendFailures.join("\n")));
+    }
+  } catch (err) {
+    _alertOwner("onCalendarChange " + calendarId, err);
+    throw err;
   } finally {
     cache.remove(calLockKey);
   }
 }
 
+// 單次執行內只讀一次 property（GAS 每次執行全域變數重新初始化）
+let _muteKeywords = null;
+
 function _isMutedEvent(title) {
-  const raw = PROPS.getProperty("MUTE_KEYWORDS") || "";
-  if (!raw.trim()) return false;
-  const keywords = raw
-    .split(",")
-    .map(function (s) {
-      return s.trim();
-    })
-    .filter(Boolean);
-  return keywords.some(function (kw) {
+  if (_muteKeywords === null) {
+    _muteKeywords = (PROPS.getProperty("MUTE_KEYWORDS") || "")
+      .split(",")
+      .map(function (s) {
+        return s.trim();
+      })
+      .filter(Boolean);
+  }
+  return _muteKeywords.some(function (kw) {
     return title.indexOf(kw) !== -1;
   });
 }
@@ -212,49 +316,29 @@ function _formatChangeMessage(item, overrideIsNew) {
 
 // ===== 明日行程提醒（每天 09:00 執行）=====
 function sendDailyReminders() {
-  const calendarIds = _getCalendarIds();
-  const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
-  const ownerUserId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
-  const contactUserId = (PROPS.getProperty("CONTACT_USER_ID") || "").trim();
-  if (calendarIds.length === 0 || !token || !ownerUserId || !contactUserId) return;
+  try {
+    _sendDailyReminders();
+  } catch (err) {
+    _alertOwner("sendDailyReminders", err);
+    throw err;
+  }
+}
+
+function _sendDailyReminders() {
+  const { calendarIds, token, ownerUserId, contactUserId } = _getConfig();
+  if (calendarIds.length === 0 || !token || !ownerUserId || !contactUserId) {
+    throw new Error("設定不完整：需有 CALENDAR_IDS、LINE_ACCESS_TOKEN、OWNER_USER_ID、CONTACT_USER_ID");
+  }
 
   const { start, end } = _getTomorrowRange();
 
-  // 查詢所有日曆，以 event id 或「標題+開始時間」去重
-  const seen = Object.create(null);
-  const allEvents = [];
-
-  calendarIds.forEach((calendarId) => {
-    const result = Calendar.Events.list(calendarId, {
-      timeMin: start.toISOString(),
-      timeMax: end.toISOString(),
-      showDeleted: false,
-      singleEvents: true,
-      orderBy: "startTime",
-    });
-    (result.items || []).forEach((event) => {
-      const titleKey = (event.summary || "") + "|" + (event.start.dateTime || event.start.date || "");
-      if (!seen[event.id] && !seen[titleKey]) {
-        seen[event.id] = true;
-        seen[titleKey] = true;
-        if (!_isMutedEvent(event.summary || "")) {
-          allEvents.push(event);
-        }
-      }
-    });
-  });
+  // 查詢所有日曆（跨日曆去重、排序），排除靜音行程
+  const allEvents = _fetchMergedEvents(start, end, true);
 
   if (allEvents.length === 0) {
     Logger.log("明日無行程，不發通知");
     return;
   }
-
-  // 跨日曆合併後重新排序
-  allEvents.sort((a, b) => {
-    const at = a.start.dateTime || a.start.date;
-    const bt = b.start.dateTime || b.start.date;
-    return at < bt ? -1 : at > bt ? 1 : 0;
-  });
 
   const lines = ["⏰ 明日行程提醒", "──────────"];
   allEvents.forEach((event, i) => {
@@ -267,17 +351,14 @@ function sendDailyReminders() {
   // 先發給 owner
   _sendLineMessage(token, ownerUserId, text);
 
-  // 發給 contact，並把結果回報給 owner 確認（contact 失敗不影響 owner）
-  let contactStatus;
+  // 發給 contact；成功只寫 log（省推播額度），失敗才告警 owner（contact 失敗不影響 owner）
   try {
     _sendLineMessage(token, contactUserId, text);
-    contactStatus = "✅ 每日提醒已傳送給 contact\nuserId=" + contactUserId;
+    Logger.log("已發送明日行程提醒，共 " + allEvents.length + " 筆；contact 已送達 userId=" + contactUserId);
   } catch (sendErr) {
-    contactStatus = "❌ 傳送 contact 失敗\nuserId=" + contactUserId + "\n錯誤：" + sendErr.message;
+    Logger.log("已發送明日行程提醒給 owner；傳送 contact 失敗 userId=" + contactUserId + " err=" + sendErr.message);
+    _alertOwner("每日提醒傳送 contact 失敗", new Error("userId=" + contactUserId + "\n" + sendErr.message));
   }
-  _sendLineMessage(token, ownerUserId, contactStatus);
-
-  Logger.log("已發送明日行程提醒，共 " + allEvents.length + " 筆；" + contactStatus.replace(/\n/g, " "));
 }
 
 function _getTomorrowRange() {
@@ -316,62 +397,143 @@ function doPost(e) {
     if (body.action === "createEvent") {
       return _handleLiffCreateEvent(body);
     }
+    if (body.action === "updateEvent") {
+      return _handleLiffUpdateEvent(body);
+    }
+    if (body.action === "deleteEvent") {
+      return _handleLiffDeleteEvent(body);
+    }
     (body.events || []).forEach((event) => {
       if (event.type === "message" && event.message.type === "text") {
-        _handleLineMessage(event.replyToken, event.message.text.trim());
+        const sourceUserId = event.source && event.source.userId;
+        if (!_isAllowedUser(sourceUserId)) {
+          Logger.log("非白名單使用者，略過 webhook 訊息 userId=" + (sourceUserId || "無"));
+          return;
+        }
+        _handleLineMessage(event.replyToken, event.message.text.trim(), sourceUserId);
       }
     });
   } catch (err) {
     Logger.log("doPost 錯誤：" + err.message);
   }
-  return ContentService.createTextOutput(JSON.stringify({ status: "ok" })).setMimeType(ContentService.MimeType.JSON);
+  return _jsonOut({ status: "ok" });
 }
 
-function _handleLiffCreateEvent(data) {
+// 驗證表單欄位：回傳 { error } 或 { title, startDate, endDate, location, note }
+function _parseLiffEventFields(data) {
+  const { title, start, end, location, note } = data;
+  if (!title || !start || !end) return { error: "缺少必填欄位" };
+  const startDate = new Date(start + ":00+08:00");
+  const endDate = new Date(end + ":00+08:00");
+  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return { error: "時間格式錯誤" };
+  if (endDate <= startDate) return { error: "結束時間需晚於開始時間" };
+  return { title, startDate, endDate, location, note };
+}
+
+// 提醒：行程當天 09:00 彈出
+function _buildReminders(startDate) {
+  const eventDateStr = Utilities.formatDate(startDate, TZ, "yyyy-MM-dd");
+  const nineAM = new Date(eventDateStr + "T09:00:00+08:00");
+  const minutesBeforeStart = Math.round((startDate - nineAM) / 60000);
+  return minutesBeforeStart > 0 ? { useDefault: false, overrides: [{ method: "popup", minutes: minutesBeforeStart }] } : { useDefault: false, overrides: [] };
+}
+
+// 權限：OWNER 可動全部；CONTACT 只能動 createdBy 為自己的行程。回傳 { event } 或 { error }
+function _authorizeEventChange(userId, calendarId, eventId) {
+  let event;
+  try {
+    event = Calendar.Events.get(calendarId, eventId);
+  } catch (err) {
+    return { error: "找不到行程" };
+  }
+  const ownerUserId = (PROPS.getProperty("OWNER_USER_ID") || "").trim();
+  const createdBy = event.extendedProperties && event.extendedProperties.private && event.extendedProperties.private.createdBy;
+  if (userId !== ownerUserId && createdBy !== userId) {
+    Logger.log("行程異動被拒：userId=" + userId + " eventId=" + eventId);
+    return { error: "無權限" };
+  }
+  return { event };
+}
+
+// 建立 / 修改 / 刪除共用：驗證身分、取鎖、執行 fn(userId, calendarId)
+function _withVerifiedUser(data, label, fn) {
+  const userId = _verifyLiffIdToken(data.idToken);
+  if (!_isAllowedUser(userId)) {
+    Logger.log("LIFF " + label + "被拒：未授權 userId=" + (userId || "驗證失敗"));
+    return _jsonOut({ ok: false, error: "未授權" });
+  }
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(15000)) {
-    Logger.log("LIFF 建立行程失敗：無法取得鎖");
-    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "系統忙碌，請稍後再試" })).setMimeType(ContentService.MimeType.JSON);
+    Logger.log("LIFF " + label + "失敗：無法取得鎖");
+    return _jsonOut({ ok: false, error: "系統忙碌，請稍後再試" });
   }
   try {
-    const { title, start, end, location, note } = data;
-    if (!title || !start || !end) {
-      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "缺少必填欄位" })).setMimeType(ContentService.MimeType.JSON);
-    }
-    const startDate = new Date(start + ":00+08:00");
-    const endDate = new Date(end + ":00+08:00");
-    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "時間格式錯誤" })).setMimeType(ContentService.MimeType.JSON);
-    }
     const calendarIds = _getCalendarIds();
     if (calendarIds.length === 0) {
-      return ContentService.createTextOutput(JSON.stringify({ ok: false, error: "未設定 CALENDAR_IDS" })).setMimeType(ContentService.MimeType.JSON);
+      return _jsonOut({ ok: false, error: "未設定 CALENDAR_IDS" });
     }
-    const eventResource = {
-      summary: title,
-      start: { dateTime: startDate.toISOString(), timeZone: TZ },
-      end: { dateTime: endDate.toISOString(), timeZone: TZ },
-    };
-    if (location) eventResource.location = location;
-    if (note) eventResource.description = note;
-    const eventDateStr = Utilities.formatDate(startDate, TZ, "yyyy-MM-dd");
-    const nineAM = new Date(eventDateStr + "T09:00:00+08:00");
-    const minutesBeforeStart = Math.round((startDate - nineAM) / 60000);
-    eventResource.reminders = minutesBeforeStart > 0 ? { useDefault: false, overrides: [{ method: "popup", minutes: minutesBeforeStart }] } : { useDefault: false, overrides: [] };
-    const insertedEvent = Calendar.Events.insert(eventResource, calendarIds[0]);
-    CacheService.getScriptCache().put("created_event_" + insertedEvent.id, "1", 300);
-    Logger.log("LIFF 建立行程成功：" + title);
-    return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
+    return fn(userId, calendarIds[0]);
   } catch (err) {
-    Logger.log("LIFF 建立行程失敗：" + err.message);
-    return ContentService.createTextOutput(JSON.stringify({ ok: false, error: err.message })).setMimeType(ContentService.MimeType.JSON);
+    Logger.log("LIFF " + label + "失敗：" + err.message);
+    return _jsonOut({ ok: false, error: err.message });
   } finally {
     lock.releaseLock();
   }
 }
 
-function _handleLineMessage(replyToken, text) {
-  const token = (PROPS.getProperty("LINE_ACCESS_TOKEN") || "").trim();
+function _handleLiffCreateEvent(data) {
+  return _withVerifiedUser(data, "建立行程", (userId, calendarId) => {
+    const f = _parseLiffEventFields(data);
+    if (f.error) return _jsonOut({ ok: false, error: f.error });
+    const eventResource = {
+      summary: f.title,
+      start: { dateTime: f.startDate.toISOString(), timeZone: TZ },
+      end: { dateTime: f.endDate.toISOString(), timeZone: TZ },
+      extendedProperties: { private: { createdBy: userId } },
+      reminders: _buildReminders(f.startDate),
+    };
+    if (f.location) eventResource.location = f.location;
+    if (f.note) eventResource.description = f.note;
+    const insertedEvent = Calendar.Events.insert(eventResource, calendarId);
+    CacheService.getScriptCache().put("created_event_" + insertedEvent.id, "1", 300);
+    Logger.log("LIFF 建立行程成功：" + f.title);
+    return _jsonOut({ ok: true });
+  });
+}
+
+function _handleLiffUpdateEvent(data) {
+  return _withVerifiedUser(data, "修改行程", (userId, calendarId) => {
+    const auth = _authorizeEventChange(userId, calendarId, data.eventId);
+    if (auth.error) return _jsonOut({ ok: false, error: auth.error });
+    const f = _parseLiffEventFields(data);
+    if (f.error) return _jsonOut({ ok: false, error: f.error });
+    // 清空地點 / 備註時需明確送空字串，patch 才會覆蓋
+    const patch = {
+      summary: f.title,
+      start: { dateTime: f.startDate.toISOString(), timeZone: TZ },
+      end: { dateTime: f.endDate.toISOString(), timeZone: TZ },
+      location: f.location || "",
+      description: f.note || "",
+      reminders: _buildReminders(f.startDate),
+    };
+    Calendar.Events.patch(patch, calendarId, data.eventId);
+    Logger.log("LIFF 修改行程成功：" + f.title);
+    return _jsonOut({ ok: true });
+  });
+}
+
+function _handleLiffDeleteEvent(data) {
+  return _withVerifiedUser(data, "刪除行程", (userId, calendarId) => {
+    const auth = _authorizeEventChange(userId, calendarId, data.eventId);
+    if (auth.error) return _jsonOut({ ok: false, error: auth.error });
+    Calendar.Events.remove(calendarId, data.eventId);
+    Logger.log("LIFF 刪除行程成功：" + (auth.event.summary || data.eventId));
+    return _jsonOut({ ok: true });
+  });
+}
+
+function _handleLineMessage(replyToken, text, userId) {
+  const { token } = _getConfig();
   let replyText;
 
   if (text === "本週行程") {
@@ -382,7 +544,7 @@ function _handleLineMessage(replyToken, text) {
     const liffId = PROPS.getProperty("LIFF_APP_ID");
     replyText = liffId ? "📅 點選連結開啟新增行程表單：\nhttps://liff.line.me/" + liffId : "❌ 尚未設定 LIFF_APP_ID，請聯繫管理員";
   } else if (_looksLikeEventData(text)) {
-    replyText = _createEventFromText(text);
+    replyText = _createEventFromText(text, userId);
   } else {
     return;
   }
@@ -391,35 +553,8 @@ function _handleLineMessage(replyToken, text) {
 }
 
 function _getWeekEventText(weekOffset) {
-  const calendarIds = _getCalendarIds();
   const { start, end } = _getWeekRange(weekOffset);
-
-  const seen = Object.create(null);
-  const allEvents = [];
-
-  calendarIds.forEach((calendarId) => {
-    const result = Calendar.Events.list(calendarId, {
-      timeMin: start.toISOString(),
-      timeMax: end.toISOString(),
-      showDeleted: false,
-      singleEvents: true,
-      orderBy: "startTime",
-    });
-    (result.items || []).forEach((event) => {
-      const titleKey = (event.summary || "") + "|" + (event.start.dateTime || event.start.date || "");
-      if (!seen[event.id] && !seen[titleKey]) {
-        seen[event.id] = true;
-        seen[titleKey] = true;
-        allEvents.push(event);
-      }
-    });
-  });
-
-  allEvents.sort((a, b) => {
-    const at = a.start.dateTime || a.start.date;
-    const bt = b.start.dateTime || b.start.date;
-    return at < bt ? -1 : at > bt ? 1 : 0;
-  });
+  const allEvents = _fetchMergedEvents(start, end, false);
 
   const label = weekOffset === 0 ? "本週" : "下週";
   const startStr = Utilities.formatDate(start, TZ, "MM/dd");
@@ -447,7 +582,7 @@ function _looksLikeEventData(text) {
   return /^\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}$/.test(lines[1]);
 }
 
-function _createEventFromText(text) {
+function _createEventFromText(text, userId) {
   const lines = text
     .split("\n")
     .map((s) => s.trim())
@@ -461,23 +596,25 @@ function _createEventFromText(text) {
 
   if (lines.length >= 3 && /^\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}$/.test(lines[2])) {
     endDate = _parseDateTime(lines[2]);
+    if (!endDate) return "❌ 結束時間格式錯誤，請用：2026/06/10 15:00";
     descLines = lines.slice(3);
   } else {
     endDate = new Date(startDate.getTime() + 60 * 60 * 1000);
     descLines = lines.slice(2);
   }
+  if (endDate <= startDate) return "❌ 結束時間需晚於開始時間";
 
   const calendarIds = _getCalendarIds();
   if (calendarIds.length === 0) return "❌ 未設定 CALENDAR_IDS";
 
-  const eventResource = {
-    summary: title,
-    start: { dateTime: startDate.toISOString(), timeZone: TZ },
-    end: { dateTime: endDate.toISOString(), timeZone: TZ },
-  };
-  if (descLines.length > 0) eventResource.description = descLines.join("\n");
-
   try {
+    const eventResource = {
+      summary: title,
+      start: { dateTime: startDate.toISOString(), timeZone: TZ },
+      end: { dateTime: endDate.toISOString(), timeZone: TZ },
+    };
+    if (descLines.length > 0) eventResource.description = descLines.join("\n");
+    if (userId) eventResource.extendedProperties = { private: { createdBy: userId } };
     const insertedEvent = Calendar.Events.insert(eventResource, calendarIds[0]);
     CacheService.getScriptCache().put("created_event_" + insertedEvent.id, "1", 300);
     const startStr = Utilities.formatDate(startDate, TZ, "yyyy/MM/dd HH:mm");
@@ -493,7 +630,11 @@ function _createEventFromText(text) {
 function _parseDateTime(str) {
   const m = str.match(/^(\d{4})\/(\d{2})\/(\d{2})\s+(\d{2}):(\d{2})$/);
   if (!m) return null;
-  return new Date(m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":00+08:00");
+  const date = new Date(m[1] + "-" + m[2] + "-" + m[3] + "T" + m[4] + ":" + m[5] + ":00+08:00");
+  if (isNaN(date.getTime())) return null;
+  // round-trip：擋掉會被 JS 自動進位的日期（如 02/31 → 03/03）
+  if (Utilities.formatDate(date, TZ, "yyyy/MM/dd HH:mm") !== str.replace(/\s+/, " ")) return null;
+  return date;
 }
 
 function _getWeekRange(weekOffset) {
@@ -509,10 +650,41 @@ function _getWeekRange(weekOffset) {
   return { start: monday, end: sunday };
 }
 
+// LINE text message 上限 5000 字元、單次請求最多 5 則：依換行切段，超過則截斷
+function _toLineMessages(text) {
+  const LIMIT = 4800;
+  const MAX_MESSAGES = 5;
+  const chunks = [];
+  let current = "";
+  text.split("\n").forEach((line) => {
+    while (line.length > LIMIT) {
+      if (current) {
+        chunks.push(current);
+        current = "";
+      }
+      chunks.push(line.slice(0, LIMIT));
+      line = line.slice(LIMIT);
+    }
+    if (current && current.length + 1 + line.length > LIMIT) {
+      chunks.push(current);
+      current = line;
+    } else {
+      current = current ? current + "\n" + line : line;
+    }
+  });
+  if (current || chunks.length === 0) chunks.push(current);
+
+  if (chunks.length > MAX_MESSAGES) {
+    chunks.length = MAX_MESSAGES;
+    chunks[MAX_MESSAGES - 1] = chunks[MAX_MESSAGES - 1].slice(0, LIMIT - 10) + "\n…（已截斷）";
+  }
+  return chunks.map((t) => ({ type: "text", text: t }));
+}
+
 function _replyLineMessage(token, replyToken, text) {
   const payload = JSON.stringify({
     replyToken: replyToken,
-    messages: [{ type: "text", text: text }],
+    messages: _toLineMessages(text),
   });
 
   const response = UrlFetchApp.fetch(LINE_REPLY_URL, {
@@ -533,7 +705,7 @@ function _replyLineMessage(token, replyToken, text) {
 function _sendLineMessage(token, userId, text) {
   const payload = JSON.stringify({
     to: userId,
-    messages: [{ type: "text", text: text }],
+    messages: _toLineMessages(text),
   });
 
   const response = UrlFetchApp.fetch(LINE_PUSH_URL, {
@@ -615,7 +787,7 @@ function _getFormHtml() {
     '  document.getElementById("start").value = toLocalStr(defaultStart);\n' +
     '  document.getElementById("end").value = toLocalStr(new Date(defaultStart.getTime() + 3600000));\n' +
     "})();\n" +
-    'liff.init({ liffId: LIFF_ID }).catch(function(e) { console.warn("LIFF init:", e); });\n' +
+    'var liffReady = liff.init({ liffId: LIFF_ID }).catch(function(e) { console.warn("LIFF init:", e); });\n' +
     "function showMsg(text, type) {\n" +
     '  var el = document.getElementById("msg");\n' +
     "  el.textContent = text;\n" +
@@ -634,16 +806,21 @@ function _getFormHtml() {
     '  if (end <= start) { showMsg("結束時間需晚於開始時間", "err"); return; }\n' +
     "  self.disabled = true;\n" +
     '  showMsg("建立中...", "loading");\n' +
-    "  fetch(SCRIPT_URL, {\n" +
-    '    method: "POST",\n' +
-    '    mode: "no-cors",\n' +
-    '    headers: { "Content-Type": "text/plain" },\n' +
-    '    body: JSON.stringify({ action: "createEvent", title: title, start: start, end: end, location: location, note: note })\n' +
+    "  liffReady.then(function() {\n" +
+    "    var idToken = null;\n" +
+    "    try { idToken = liff.getIDToken(); } catch(e) {}\n" +
+    '    if (!idToken) { throw new Error("no idToken"); }\n' +
+    "    return fetch(SCRIPT_URL, {\n" +
+    '      method: "POST",\n' +
+    '      mode: "no-cors",\n' +
+    '      headers: { "Content-Type": "text/plain" },\n' +
+    '      body: JSON.stringify({ action: "createEvent", idToken: idToken, title: title, start: start, end: end, location: location, note: note })\n' +
+    "    });\n" +
     "  }).then(function() {\n" +
     '    showMsg("✅ 行程已建立！", "ok");\n' +
     "    setTimeout(function() { try { liff.closeWindow(); } catch(e) {} }, 1500);\n" +
-    "  }).catch(function() {\n" +
-    '    showMsg("❌ 送出失敗，請重試", "err");\n' +
+    "  }).catch(function(e) {\n" +
+    '    showMsg(e && e.message === "no idToken" ? "❌ 無法取得登入資訊，請從 LINE 內開啟並確認 LIFF 已啟用 openid" : "❌ 送出失敗，請重試", "err");\n' +
     "    self.disabled = false;\n" +
     "  });\n" +
     "});\n" +

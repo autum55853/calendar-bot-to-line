@@ -47,7 +47,7 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 ### 關鍵設計細節
 
 - **syncToken 機制**：`onCalendarChange` 使用 `SYNC_TOKEN_<calendarId>` 做增量同步，避免重複通知。HTTP 410 錯誤時自動重設 syncToken。
-- **新增 vs 修改判斷**：`created` 與 `updated` 時間差 < 5000ms 視為新建。
+- **新增 vs 修改判斷**：`created` 與 `updated` 時間差 < 30000ms 視為新建（`_formatChangeMessage`）。
 - **跨日曆去重**：`sendDailyReminders` 用 `event.id` 和 `標題|開始時間` 雙重 key 去重，防止同步至多個日曆的事件重複出現。
 - **訊息發送**：同一事件通知同時推播給 `OWNER_USER_ID` 和 `CONTACT_USER_ID`。
 
@@ -57,11 +57,23 @@ Google Apps Script 專案，監聽 Google Calendar 事件變更並透過 LINE Me
 
 **設定步驟：**
 1. 前往 LINE Developers Console → Messaging API 頻道 → LIFF 頁籤
-2. 建立新 LIFF App：Size = Full，Endpoint URL = Apps Script Web App URL
+2. 建立新 LIFF App：Size = Full，Endpoint URL = Apps Script Web App URL，**Scope 必須勾 `openid`**
 3. 取得 LIFF ID（格式：`1234567890-xxxxxxxx`）
 4. 在 Script Properties 設定 `LIFF_APP_ID`
 
-**CORS 限制：** LIFF 表單送出用 `fetch` + `mode: 'no-cors'`（避免 preflight），回應為 opaque 型態無法讀取，前端採樂觀 UI（送出即顯示成功）。時間統一以台灣時區（UTC+8）處理。
+**CORS 限制：** LIFF 表單送出用 `fetch` + `mode: 'no-cors'`（避免 preflight），回應為 opaque 型態無法讀取，前端採樂觀 UI（送出即顯示成功）。**因此後端拒絕（未授權、時間錯誤）時前端仍會顯示成功，要看 Apps Script 執行記錄才知道。** 時間統一以台灣時區（UTC+8）處理。
+
+## 存取控制與告警
+
+- `doPost` 兩條路徑都有白名單（`OWNER_USER_ID` / `CONTACT_USER_ID`，未設定＝全部拒絕）：LIFF `createEvent` 驗證 ID token（`_verifyLiffIdToken`，`client_id` = `LIFF_APP_ID` 的 `-` 前段）；LINE webhook 比對 `source.userId`。GAS 讀不到 `x-line-signature`，webhook 無法驗簽。
+- 失敗告警走 `_alertOwner(context, err)`（推播 owner、同 context 10 分鐘節流、不自動重試）。新增排程或背景流程時沿用，不要靜默 return。
+- 更新 `Code.gs` 後 Web App 要部署**新版本**才會生效。
+
+## 本地測試
+
+`node --test tests/code.test.js`（無套件；vm 載入 `Code.gs` + mock GAS 全域）。改動 `Code.gs` 後必跑。
+
+真實推播煙霧測試：`node scripts/live-smoke.js`（讀 `.env`；真的推 5 則到 LINE，**只送 `OWNER_USER_ID`**，CONTACT 一律由 `scripts/lib/owner-only-fetch.js` 攔截，守門邏輯有 `tests/owner-only.test.js` 覆蓋）。
 
 ## 注意事項
 

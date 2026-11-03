@@ -70,7 +70,7 @@ Webhook handler 中印出 `event.source.userId` 即可取得各自的 userId（`
    - **LIFF App Name**：任意（如 `Event Creator`）
    - **Size**：`Full`
    - **Endpoint URL**：貼上上面複製的 Web App URL
-   - **Permissions**：`profile`、`openid`、`email`（可選）
+   - **Scope**：必須勾 `openid`（後端用 ID token 驗證送出者身分，未勾則表單無法建立行程）；`profile`、`email` 可選
 4. 複製生成的 **LIFF ID**（格式：`1234567890-xxxxxxxx`）
 5. 回到 Script Properties，新增 `LIFF_APP_ID` = 複製的 LIFF ID
 
@@ -202,3 +202,16 @@ Webhook handler 中印出 `event.source.userId` 即可取得各自的 userId（`
 - **新增行程快取**：新增後 5 分鐘內自動註記 cache key，避免立即被 onEventUpdated trigger 重複通知
 - **LINE 推播額度**：push message 需要 **付費方案** 或在免費額度內（每月 200 則免費）
 - **時間篩選**：`onCalendarChange` 自動略過已過期（> 24 小時前）的事件，避免歷史資料污染
+- **存取控制**：只有 `OWNER_USER_ID` / `CONTACT_USER_ID` 能操作 bot。LIFF 表單送出時後端以 LINE `verify` API 驗證 ID token；webhook 訊息比對 `source.userId` 白名單。Apps Script 讀不到 `x-line-signature`，webhook 無法驗簽，只能靠白名單（userId 不公開但不是密鑰）
+- **失敗告警**：`onCalendarChange` / `sendDailyReminders` 失敗、或單一收件者推播失敗時，會推播 `🚨` 告警給 owner（同一情境 10 分鐘內只發一次）。**不會自動重試**，避免已收到的人收到重複通知
+- **每日提醒的送達確認**：contact 成功收到時不再額外通知（省額度）；失敗才告警。查上次結果：Apps Script →「執行項目」看 `sendDailyReminders`
+- **長訊息分段**：LINE 單則上限 5000 字元，超過時依換行自動拆成多則（單次最多 5 則，再多則截斷並標註「…（已截斷）」）。注意多則會各算一則額度
+- **更新程式後**：貼上新 `Code.gs` 後，Web App 需 **部署 → 管理部署作業 → 編輯 → 新版本**，否則線上仍是舊版
+
+## 本地測試
+
+無需安裝套件（Node 內建 test runner，以 vm 載入 `Code.gs` 並 mock Apps Script 全域）：
+
+```bash
+node --test tests/code.test.js
+```
